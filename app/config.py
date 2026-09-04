@@ -14,7 +14,11 @@ class Settings(BaseSettings):
 
     host: str = "0.0.0.0"
     port: int = Field(default=8000, ge=1, le=65535)
-    database_url: str
+    database_url: str | None = None
+    db_pool_min_size: int = Field(default=1, ge=1)
+    db_pool_max_size: int = Field(default=10, ge=1)
+    db_pool_timeout: float = Field(default=10.0, gt=0)
+    app_api_key: str | None = None
     model_provider: str = "openai"
     model_name: str = "gpt-4o-mini"
     system_prompt: str = "You are a helpful AI assistant."
@@ -28,6 +32,18 @@ class Settings(BaseSettings):
     @property
     def normalized_provider(self) -> str:
         return self.model_provider.strip().lower()
+
+    @property
+    def normalized_database_url(self) -> str:
+        value = self.database_url.strip() if self.database_url else ""
+        if not value:
+            raise ValueError("DATABASE_URL is required; PostgreSQL is the persistence backend.")
+        return value
+
+    @property
+    def normalized_app_api_key(self) -> str | None:
+        value = self.app_api_key.strip() if self.app_api_key else ""
+        return value or None
 
     @property
     def model_identifier(self) -> str:

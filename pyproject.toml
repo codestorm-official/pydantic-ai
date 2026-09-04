@@ -1,7 +1,7 @@
 [project]
 name = "pydantic-ai-agent"
 version = "0.1.0"
-description = "A typed AI agent runtime with web chat and multi-provider model support."
+description = "A typed AI agent runtime with web chat and persistent conversation memory."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -34,3 +34,4 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]

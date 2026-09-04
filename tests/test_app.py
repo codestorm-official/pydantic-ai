@@ -10,15 +10,10 @@ from pydantic_ai import ModelMessage, ModelMessagesTypeAdapter, ModelRequest, Mo
 from pydantic_ai.messages import TextPart, UserPromptPart
 
 import app.main as main_module
-from app.agent import ChatResult
+from app.agent import AgentProviderError, AgentTimeoutError, ChatResult
 from app.config import get_settings
 from app.database import Conversation, ConversationNotFoundError, ConversationRepository
 from app.main import app
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return "asyncio"
 
 
 class FakeRepository:
@@ -128,10 +123,55 @@ def test_health_endpoint(client: TestClient) -> None:
     assert response.json() == {"status": "ok", "database": "ok"}
 
 
+def test_web_ui(client: TestClient) -> None:
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Pydantic AI" in response.text
+    assert "textContent" in response.text
+    assert client.get("/docs").status_code == 200
+
+
+@pytest.mark.anyio
+async def test_startup_requires_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    get_settings.cache_clear()
+    with pytest.raises(ValueError, match="DATABASE_URL is required"):
+        async with main_module.lifespan(app):
+            pass
+
+
+def test_public_config_never_contains_secrets(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+    monkeypatch.setenv("APP_API_KEY", "application-secret")
+    get_settings.cache_clear()
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    body = response.text
+    assert "provider-secret" not in body
+    assert "application-secret" not in body
+    assert response.json() == {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "configured": True,
+    }
+
+
 def test_conversation_creation(client: TestClient) -> None:
     response = client.post("/api/conversations")
     assert response.status_code == 201
     assert response.json()["messages"] == []
+
+
+def test_get_and_delete_conversation(client: TestClient) -> None:
+    created = client.post("/api/conversations").json()
+    conversation_id = created["conversation_id"]
+    loaded = client.get(f"/api/conversations/{conversation_id}")
+    assert loaded.status_code == 200
+    assert loaded.json()["conversation_id"] == conversation_id
+    assert client.delete(f"/api/conversations/{conversation_id}").status_code == 204
+    assert client.get(f"/api/conversations/{conversation_id}").status_code == 404
 
 
 @pytest.mark.anyio
@@ -194,6 +234,63 @@ def test_missing_model_api_key(client: TestClient) -> None:
     }
 
 
+def test_unsupported_provider(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER", "unsupported")
+    get_settings.cache_clear()
+    response = client.post("/api/chat", json={"message": "Hello"})
+    assert response.status_code == 500
+    assert "Unsupported MODEL_PROVIDER" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [(AgentTimeoutError("timed out"), 504), (AgentProviderError("provider failed"), 502)],
+)
+def test_sanitized_agent_errors(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected_status: int,
+) -> None:
+    async def failed_chat(*args: Any, **kwargs: Any) -> ChatResult:
+        del args, kwargs
+        raise error
+
+    monkeypatch.setattr(main_module, "chat", failed_chat)
+    response = client.post("/api/chat", json={"message": "Hello"})
+    assert response.status_code == expected_status
+    assert "Traceback" not in response.text
+
+
+def test_failed_agent_run_preserves_existing_history(
+    client: TestClient,
+    repository: FakeRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conversation = client.post("/api/conversations").json()
+    identifier = UUID(conversation["conversation_id"])
+    original = history("Earlier", "Still here")
+    repository.conversations[identifier] = Conversation(
+        identifier,
+        repository.conversations[identifier].created_at,
+        repository.conversations[identifier].updated_at,
+        original,
+    )
+
+    async def failed_chat(*args: Any, **kwargs: Any) -> ChatResult:
+        del args, kwargs
+        raise AgentProviderError("safe provider error")
+
+    monkeypatch.setattr(main_module, "chat", failed_chat)
+    response = client.post(
+        "/api/chat", json={"message": "Fail", "conversation_id": str(identifier)}
+    )
+    assert response.status_code == 502
+    assert repository.conversations[identifier].messages == original
+
+
 def test_database_failure_returns_503(client: TestClient) -> None:
     async def broken_ping() -> None:
         raise OperationalError("connection failed")
@@ -202,3 +299,32 @@ def test_database_failure_returns_503(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 503
     assert response.json() == {"detail": "Database is unavailable."}
+
+
+def test_database_failure_during_conversation_returns_503(client: TestClient) -> None:
+    async def broken_create(conversation_id: UUID | None = None) -> Conversation:
+        del conversation_id
+        raise OperationalError("connection failed with secret details")
+
+    app.state.repository.create = broken_create
+    response = client.post("/api/conversations")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Database is unavailable."}
+    assert "secret details" not in response.text
+
+
+def test_optional_api_key_auth(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APP_API_KEY", "test-token")
+    get_settings.cache_clear()
+    assert client.get("/").status_code == 200
+    assert client.get("/health").status_code == 200
+    assert client.get("/api/config").status_code == 200
+    unauthorized = client.post("/api/conversations")
+    assert unauthorized.status_code == 401
+    assert unauthorized.headers["www-authenticate"] == "Bearer"
+    authorized = client.post(
+        "/api/conversations", headers={"Authorization": "Bearer test-token"}
+    )
+    assert authorized.status_code == 201

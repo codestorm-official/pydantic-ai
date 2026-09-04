@@ -4,11 +4,12 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from hmac import compare_digest
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 from psycopg import Error as PsycopgError
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
@@ -61,6 +62,20 @@ def get_repository(request: Request) -> ConversationRepository:
     return repository
 
 
+async def require_api_key(request: Request) -> None:
+    expected = get_settings().normalized_app_api_key
+    if expected is None:
+        return
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, credential = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not credential or not compare_digest(credential, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A valid Bearer token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 def conversation_response(conversation: Conversation) -> ConversationResponse:
     return ConversationResponse(
         conversation_id=conversation.id,
@@ -73,25 +88,40 @@ def conversation_response(conversation: Conversation) -> ConversationResponse:
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    pool = AsyncConnectionPool(
-        conninfo=settings.database_url,
-        min_size=1,
-        max_size=10,
-        open=False,
-        timeout=10,
-    )
-    await pool.open(wait=True)
     try:
+        database_url = settings.normalized_database_url
+    except ValueError:
+        logger.critical("Startup failed: DATABASE_URL is required for PostgreSQL persistence.")
+        raise
+    if settings.db_pool_min_size > settings.db_pool_max_size:
+        message = "DB_POOL_MIN_SIZE cannot be greater than DB_POOL_MAX_SIZE."
+        logger.critical("Startup failed: %s", message)
+        raise ValueError(message)
+    pool = AsyncConnectionPool(
+        conninfo=database_url,
+        min_size=settings.db_pool_min_size,
+        max_size=settings.db_pool_max_size,
+        open=False,
+        timeout=settings.db_pool_timeout,
+    )
+    try:
+        await pool.open(wait=True)
         repository = ConversationRepository(pool)
         await repository.initialize()
         application.state.repository = repository
         yield
+    except (PsycopgError, PoolTimeout):
+        logger.critical(
+            "Startup failed: PostgreSQL is required but could not be reached. "
+            "Check DATABASE_URL and service availability."
+        )
+        raise
     finally:
         await pool.close()
 
 
 app = FastAPI(
-    title="Pydantic AI Agent",
+    title="Pydantic AI",
     description="A typed AI agent runtime with persistent conversations.",
     version="0.2.0",
     lifespan=lifespan,
@@ -136,6 +166,7 @@ async def config() -> ConfigResponse:
     response_model=ConversationResponse,
     status_code=status.HTTP_201_CREATED,
     responses={503: {"model": ErrorDetail}},
+    dependencies=[Depends(require_api_key)],
 )
 async def create_conversation(request: Request) -> ConversationResponse:
     try:
@@ -153,6 +184,7 @@ async def create_conversation(request: Request) -> ConversationResponse:
     "/api/conversations/{conversation_id}",
     response_model=ConversationResponse,
     responses={404: {"model": ErrorDetail}, 503: {"model": ErrorDetail}},
+    dependencies=[Depends(require_api_key)],
 )
 async def get_conversation(conversation_id: UUID, request: Request) -> ConversationResponse:
     try:
@@ -174,6 +206,7 @@ async def get_conversation(conversation_id: UUID, request: Request) -> Conversat
     "/api/conversations/{conversation_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     responses={404: {"model": ErrorDetail}, 503: {"model": ErrorDetail}},
+    dependencies=[Depends(require_api_key)],
 )
 async def delete_conversation(conversation_id: UUID, request: Request) -> Response:
     try:
@@ -201,6 +234,7 @@ async def delete_conversation(conversation_id: UUID, request: Request) -> Respon
         503: {"model": ErrorDetail},
         504: {"model": ErrorDetail},
     },
+    dependencies=[Depends(require_api_key)],
 )
 async def api_chat(payload: ChatRequest, request: Request) -> ChatResponse:
     repository = get_repository(request)
