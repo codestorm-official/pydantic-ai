@@ -1,7 +1,8 @@
 import asyncio
 from dataclasses import dataclass
+from uuid import UUID
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, ModelMessage
 from pydantic_ai.exceptions import AgentRunError, ModelAPIError
 
 from app.config import Settings
@@ -24,6 +25,7 @@ class ChatResult:
     response: str
     model: str
     provider: str
+    messages: list[ModelMessage]
 
 
 def build_agent(settings: Settings) -> Agent[None, str]:
@@ -38,15 +40,26 @@ def build_agent(settings: Settings) -> Agent[None, str]:
     return Agent(identifier, instructions=settings.system_prompt)
 
 
-async def chat(message: str, settings: Settings) -> ChatResult:
+async def chat(
+    message: str,
+    conversation_id: UUID,
+    message_history: list[ModelMessage],
+    settings: Settings,
+) -> ChatResult:
     agent = build_agent(settings)
     try:
         result = await asyncio.wait_for(
-            agent.run(message), timeout=settings.request_timeout_seconds
+            agent.run(
+                message,
+                message_history=message_history,
+                conversation_id=str(conversation_id),
+            ),
+            timeout=settings.request_timeout_seconds,
         )
     except TimeoutError as exc:
+        timeout = settings.request_timeout_seconds
         raise AgentTimeoutError(
-            f"The model provider did not respond within {settings.request_timeout_seconds:g} seconds."
+            f"The model provider did not respond within {timeout:g} seconds."
         ) from exc
     except ModelAPIError as exc:
         raise AgentProviderError(
@@ -61,4 +74,5 @@ async def chat(message: str, settings: Settings) -> ChatResult:
         response=result.output,
         model=settings.model_name,
         provider=settings.normalized_provider,
+        messages=result.all_messages(),
     )

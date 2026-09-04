@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.116,<1",
     "pydantic-ai-slim[anthropic,google,groq,openai]>=1.0,<2",
     "pydantic-settings>=2.10,<3",
+    "psycopg[binary,pool]>=3.2,<4",
     "uvicorn[standard]>=0.35,<1",
 ]
 
@@ -33,4 +34,3 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

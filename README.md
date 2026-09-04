@@ -1,37 +1,42 @@
 # Deploy and Host Pydantic AI Agent on Railway
 
-A typed AI agent runtime with web chat and multi-provider model support.
+A typed AI agent runtime with persistent web chat and multi-provider model support.
 
 ## About Hosting Pydantic AI Agent
 
-This repository is a small production-oriented starter for running a [Pydantic AI](https://pydantic.dev/docs/ai/) agent on Railway. FastAPI exposes a browser chat and typed JSON API, while Pydantic AI handles the provider-specific model runtime. The app boots without credentials so Railway health checks and the UI remain available while configuration is being completed.
+This production-oriented starter runs a [Pydantic AI](https://pydantic.dev/docs/ai/) agent behind FastAPI. Complete Pydantic AI message histories are serialized with `ModelMessagesTypeAdapter` and stored in PostgreSQL, preserving tool calls, tool results, metadata, and provider-specific message parts across requests.
+
+The application requires `DATABASE_URL`, but it can boot without an LLM API key. This lets the UI and database-backed health check run while provider configuration is completed.
 
 ## Common Use Cases
 
-- Add an AI assistant to an internal tool or product prototype.
-- Start a typed agent API before adding domain-specific tools and dependencies.
-- Evaluate OpenAI, Anthropic, Google Gemini, or Groq through one small deployment.
-- Host a stateless chat endpoint without operating a database or queue.
+- Persistent customer or internal AI assistants
+- Typed agent APIs with multi-turn context
+- Provider evaluation across OpenAI, Anthropic, Google Gemini, and Groq
+- A small foundation for adding domain tools, authentication, and observability
 
 ## Dependencies for Pydantic AI Agent Hosting
 
 - Python 3.12
 - Pydantic AI
 - FastAPI and Uvicorn
+- PostgreSQL
+- Psycopg 3 async connection pooling
 - `uv` for dependency management
-- One API key for the selected AI provider
+- One API key for the selected model provider
 
-No Postgres, Redis, persistent volume, or other Railway service is required.
+Redis and application volumes are not required.
 
 ## Features
 
-- Pydantic AI `Agent` runtime with a configurable system prompt
-- Responsive, dependency-free browser chat at `/`
-- Typed request and response schemas with automatic OpenAPI docs at `/docs`
-- Four selectable model providers
-- Lightweight health check that never calls an LLM
-- Clear configuration, timeout, validation, and provider errors
-- Multi-stage container build running as a non-root user
+- Official Pydantic AI `message_history` and `all_messages()` flow
+- Full history round-trip through `ModelMessagesTypeAdapter` and PostgreSQL JSONB
+- Persistent conversations identified by UUID
+- Browser chat with conversation ID persistence and a **New Chat** action
+- Typed conversation and chat endpoints with OpenAPI docs at `/docs`
+- Database-aware health endpoint that never calls an LLM
+- Automatic lightweight schema initialization
+- Multi-stage image running as a non-root user
 
 ## Supported AI Providers
 
@@ -42,30 +47,33 @@ No Postgres, Redis, persistent volume, or other Railway service is required.
 | `google` | `google:<MODEL_NAME>` | `GOOGLE_API_KEY` |
 | `groq` | `groq:<MODEL_NAME>` | `GROQ_API_KEY` |
 
-The `google:` prefix follows current Pydantic AI documentation for the Gemini API. Older examples may use `google-gla:`; that is not used by the current provider interface.
+The current Pydantic AI Gemini API prefix is `google:`. Older `google-gla:` examples are not used by this starter.
 
 ## Environment Variables
 
 | Variable | Required | Default | Purpose |
 |---|---:|---|---|
-| `MODEL_PROVIDER` | Yes | `openai` | One of `openai`, `anthropic`, `google`, `groq` |
-| `MODEL_NAME` | Yes | `gpt-4o-mini` | Provider model name, without a prefix |
-| Provider API key | Yes for chat | — | The matching credential from the table above |
+| `DATABASE_URL` | Yes | none | PostgreSQL connection URL |
+| `MODEL_PROVIDER` | Yes | `openai` | `openai`, `anthropic`, `google`, or `groq` |
+| `MODEL_NAME` | Yes | `gpt-4o-mini` | Model name without provider prefix |
+| Matching provider key | For chat | none | Credential listed in the provider table |
 | `SYSTEM_PROMPT` | No | `You are a helpful AI assistant.` | Agent instructions |
-| `REQUEST_TIMEOUT_SECONDS` | No | `60` | Per-request deadline |
-| `HOST` | No | `0.0.0.0` | Bind address |
-| `PORT` | No | `8000` | Listening port; Railway injects this |
+| `REQUEST_TIMEOUT_SECONDS` | No | `60` | Per-model-request deadline |
+| `HOST` | No | `0.0.0.0` | Network bind address |
+| `PORT` | No | `8000` | HTTP port; Railway injects this |
 
-Copy `.env.example` to `.env` for local development. Do not commit `.env` or expose provider keys in client-side code.
+Copy `.env.example` to `.env` locally and replace the database credentials. Never commit `.env`.
 
 ## API Endpoints
 
-- `GET /health` → `{"status":"ok"}` without contacting a provider.
-- `GET /api/config` → public provider/model metadata and a `configured` flag; never returns keys.
-- `POST /api/chat` accepts `{"message":"Hello"}` and returns `{"response":"...","model":"...","provider":"..."}`.
-- `GET /docs` provides interactive OpenAPI documentation.
+- `GET /health` returns `{"status":"ok","database":"ok"}` after a database ping.
+- `GET /api/config` returns public provider/model configuration without secrets.
+- `POST /api/conversations` creates an empty conversation.
+- `GET /api/conversations/{conversation_id}` returns metadata and complete serialized history.
+- `DELETE /api/conversations/{conversation_id}` permanently deletes a conversation.
+- `POST /api/chat` creates or continues a conversation.
 
-Example:
+Start a conversation:
 
 ```bash
 curl -X POST http://localhost:8000/api/chat \
@@ -73,51 +81,64 @@ curl -X POST http://localhost:8000/api/chat \
   -d '{"message":"Hello"}'
 ```
 
-Malformed input returns `422`; missing configuration returns `500`; upstream provider failures return `502`; and timeouts return `504`. Responses do not contain stack traces.
+Continue it by including the returned UUID:
+
+```json
+{
+  "message": "What did I just say?",
+  "conversation_id": "2afacb61-29da-41fe-a9cc-ae2f536ee9f7"
+}
+```
+
+Malformed UUIDs return `422`, unknown conversations return `404`, unavailable databases return `503`, provider failures return `502`, and timeouts return `504`.
 
 ## Web Interface
 
-Open `http://localhost:8000/` or the generated Railway domain. The lightweight HTML/CSS/JavaScript interface submits directly to `/api/chat`; no frontend build is required. Each request is independent—this starter does not persist conversation history.
+Open `/` on the deployed domain. The browser stores the active `conversation_id` in `localStorage` and sends it with later messages. **New Chat** clears that identifier, so the next message creates a separate PostgreSQL conversation.
 
 ## Railway Deployment
 
-1. Push this repository to GitHub.
-2. In Railway, choose **New Project → Deploy from GitHub repo** and select it.
-3. Add `MODEL_PROVIDER`, `MODEL_NAME`, and the matching provider API key under **Variables**.
-4. Deploy. Railway detects the root `Dockerfile`; no custom start command is needed.
-5. In the service settings, generate a public domain.
-6. Optionally set the health-check path to `/health`.
+Create two services in one Railway project:
 
-The container binds to `0.0.0.0` and reads Railway's injected `PORT`. Do not manually define a conflicting port. No volume, Postgres, Redis, or `RAILWAY_RUN_UID` variable is necessary.
+1. **PostgreSQL** — add Railway's PostgreSQL service. It stays private and needs no public domain.
+2. **Pydantic AI** — deploy this repository from GitHub and generate a public domain. The container listens publicly on Railway's injected port (default `8000`).
 
-For local development:
+Set these variables on the Pydantic AI service:
 
-```bash
-cp .env.example .env
+```env
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+MODEL_PROVIDER=openai
+MODEL_NAME=gpt-4o-mini
+OPENAI_API_KEY=your-secret-key
+```
+
+Set the health-check path to `/health`. Railway discovers the Dockerfile, so no custom start command is necessary. No Redis, application volume, or `RAILWAY_RUN_UID` is needed. Conversation history persists in the PostgreSQL service.
+
+For local development, create the database named in `.env`, then run:
+
+```powershell
+Copy-Item .env.example .env
 uv sync
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-On PowerShell, use `Copy-Item .env.example .env` instead of `cp` if preferred.
-
 ## Security Notes
 
-- Store API keys as Railway variables and never put them in Git or browser code.
-- The starter has no user authentication, rate limiting, moderation, or usage quotas. Add these before exposing a cost-bearing endpoint to untrusted users.
-- `/api/config` reveals only the selected provider/model and whether its key exists.
-- Provider output is displayed with `textContent`, not raw HTML.
+- Keep `DATABASE_URL` and provider keys in Railway variables, never browser code.
+- Add authentication and conversation ownership before exposing stored histories publicly.
+- This starter has no rate limiting, moderation, or usage quotas; add them before exposing a cost-bearing endpoint to untrusted users.
+- Provider output is inserted with `textContent`, not raw HTML.
+- `DELETE` is irreversible and should be protected by authentication in a public product.
 
 ## Pydantic AI vs Alternatives
 
 | Project | Primary ecosystem | Strong fit | Trade-off for this starter |
 |---|---|---|---|
-| Pydantic AI | Python/Pydantic | Typed agent applications and structured outputs | Provider behavior still varies by model |
-| Agno | Python | Broad agent, team, and knowledge tooling | More surface area than a minimal runtime needs |
+| Pydantic AI | Python/Pydantic | Typed agents and structured histories | Provider behavior varies by model |
+| Agno | Python | Broad agent, team, and knowledge tooling | More surface area than this runtime needs |
 | Mastra | TypeScript | TypeScript-native agent workflows | Not a Python/Pydantic stack |
-| CrewAI | Python | Role-based multi-agent orchestration | More orchestration than a single chat agent needs |
-
-The comparison is architectural, not a claim that one framework is universally better.
+| CrewAI | Python | Role-based multi-agent orchestration | More orchestration than a single chat needs |
 
 ## Why Deploy Pydantic AI on Railway?
 
-Railway can build the checked-in Dockerfile, supply secrets and `PORT`, monitor `/health`, and attach a public domain without provisioning supporting infrastructure. This makes the template useful as a clean base: deploy the stateless agent first, then add tools, authentication, persistence, or observability only when the product requires them.
+Railway provides the application build, private service networking, managed PostgreSQL, secrets, health checks, and a public domain in one project. The app remains stateless at the container layer while complete multi-turn conversation histories survive deployments in PostgreSQL.

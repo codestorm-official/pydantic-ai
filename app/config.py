@@ -14,6 +14,7 @@ class Settings(BaseSettings):
 
     host: str = "0.0.0.0"
     port: int = Field(default=8000, ge=1, le=65535)
+    database_url: str
     model_provider: str = "openai"
     model_name: str = "gpt-4o-mini"
     system_prompt: str = "You are a helpful AI assistant."
