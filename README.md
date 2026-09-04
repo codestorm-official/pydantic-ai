@@ -2,6 +2,8 @@
 
 A typed AI agent runtime with persistent web chat and multi-provider model support.
 
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/pydantic-ai?referralCode=indah&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
 ## About Hosting Pydantic AI
 
 This production-oriented starter runs a [Pydantic AI](https://pydantic.dev/docs/ai/) agent behind FastAPI. Complete Pydantic AI message histories are serialized with `ModelMessagesTypeAdapter` and stored in PostgreSQL, preserving tool calls, tool results, metadata, and provider-specific message parts across requests.
